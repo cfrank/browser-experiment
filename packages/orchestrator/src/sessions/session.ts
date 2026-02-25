@@ -19,6 +19,7 @@ interface ConversationMessage {
 }
 
 const MAX_CONVERSATION_CHARS = 400_000;
+const MAX_CONVERSATION_MESSAGES = 40;
 
 const IMAGE_TOKEN_ESTIMATE = 2000;
 const IMAGE_CHAR_ESTIMATE = IMAGE_TOKEN_ESTIMATE * 4;
@@ -94,6 +95,30 @@ function pruneConversation(conversation: ConversationMessage[]): void {
     }
   }
 
+  // Turn-based pruning: keep conversation from growing unboundedly
+  while (conversation.length > MAX_CONVERSATION_MESSAGES) {
+    conversation.shift();
+    if (conversation.length > 0 && conversation[0].role === "assistant") {
+      conversation.shift();
+    }
+  }
+
+  // Prune old trivial tool results beyond the most recent 6 messages to reduce noise
+  const pruneUpTo = Math.max(0, conversation.length - 6);
+  for (let i = 0; i < pruneUpTo; i++) {
+    const msg = conversation[i];
+    if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
+    msg.content = (msg.content as unknown[]).map((b) => {
+      const block = b as Record<string, unknown>;
+      if (block.type !== "tool_result") return block;
+      if (typeof block.content === "string" && block.content.length > 200) {
+        return { ...block, content: `[pruned: ${(block.content as string).slice(0, 80)}...]` };
+      }
+      return block;
+    }) as unknown as Anthropic.ContentBlock[];
+  }
+
+  // Size-based pruning: last resort if still too large
   while (conversation.length > 2 && totalConversationChars(conversation) > MAX_CONVERSATION_CHARS) {
     const oldest = conversation[0];
     if (typeof oldest.content !== "string" && Array.isArray(oldest.content)) {
@@ -120,7 +145,7 @@ const BASE_SYSTEM_PROMPT = `You are a browser agent with deep access to the user
 You have access to tools that let you:
 - Execute shell commands on the host OS (bash)
 - Read, write, and edit files (read_file, write_file, edit_file)
-- Interact with the user's browser (browser) - take screenshots, inject scripts/styles, read the DOM, capture console/network logs, navigate
+- Interact with the user's browser (browser) - take screenshots, inject scripts/styles, read the DOM, capture console/network logs, navigate, and wait for conditions
 
 Use these tools to help the user customize and control their browsing experience. You can create persistent scripts and styles that modify websites, fix annoying behaviors, add accessibility features, or automate repetitive tasks.
 
@@ -168,11 +193,24 @@ IMPORTANT: Always prefer targeted extraction over reading full files. If you can
 
 ## Screenshots
 
-The browser screenshot command captures the visible tab and attaches the image directly to the conversation -- you can see it. Screenshots are rate-limited to one every 5 seconds. Each screenshot costs ~2K tokens, so use them deliberately:
-- Take ONE screenshot after visual changes to verify the result
+The browser screenshot command captures the visible viewport and attaches the image directly to the conversation -- you can see it. Each screenshot costs ~2K tokens. Screenshot rate limiting escalates: the cooldown increases from 5s to 10s to 20s the more screenshots you take in a short period.
+
+**Screenshot budget: aim for at most 2 screenshots per action sequence.**
+- Take ONE screenshot after making visual changes to verify the result
+- Do NOT screenshot-scroll-screenshot to check the full page. Instead, use \`inject_script\` to verify: \`JSON.stringify({scrollHeight: document.body.scrollHeight, offsetHeight: document.body.offsetHeight, elementCount: document.querySelectorAll('.my-class').length})\`
 - Do NOT take multiple screenshots in a row hoping for different results
 - Do NOT try to read screenshot files via bash (base64, cat, etc.) -- the image is already visible to you
 - For gathering data, prefer \`inject_script\` or \`read_dom\` over screenshots
+
+## Async operations and waiting
+
+\`inject_script\` supports async code: if your script returns a Promise, it will be awaited automatically (30s default timeout, configurable via timeout_ms arg). This means you can write:
+- \`fetch('/api/data').then(r => r.json())\` — the resolved value is returned directly
+- \`new Promise(r => setTimeout(r, 1000)).then(() => document.title)\` — waits then returns
+
+For polling conditions (e.g. waiting for an element to appear or an image to load), use the \`wait_for\` command instead of manual setTimeout+polling patterns:
+- \`{ command: "wait_for", args: { condition: "document.querySelector('.loaded')", timeout_ms: 5000 } }\`
+- Returns \`{ met: true, value: ..., elapsed_ms: ... }\` on success, or \`{ met: false, elapsed_ms: ... }\` on timeout
 
 ## Gathering page information efficiently
 
@@ -181,7 +219,30 @@ Before reaching for read_dom on a broad selector (like "body" or "html"), consid
 - \`JSON.stringify([...document.querySelectorAll('.item')].map(e => e.textContent))\` to extract text from many elements
 - \`getComputedStyle(document.querySelector('.target')).display\` to check a single CSS property
 
-This avoids generating massive DOM dumps that need to be offloaded and searched.`;
+This avoids generating massive DOM dumps that need to be offloaded and searched.
+
+## Debugging visual issues
+
+When something visual isn't working (broken images, failed loads, blank elements, unexpected layout), use this workflow:
+1. **Check \`network_logs\` first** -- see if requests are failing (status codes, blocked requests)
+2. **Check \`console_logs\`** -- look for JavaScript errors, CORS warnings, CSP violations
+3. **Use \`inject_script\` to inspect** -- check element dimensions, computed styles, naturalWidth/naturalHeight for images
+4. Only take a screenshot if you need to visually confirm something that can't be checked programmatically
+
+Do NOT jump straight to trial-and-error with inject_script. Diagnostic tools (network_logs, console_logs) exist for a reason and are much faster at identifying the root cause.
+
+## Retry discipline
+
+When an approach isn't working:
+- **After 2-3 failed attempts at the same approach**: stop and try a fundamentally different strategy. Don't keep iterating on variations of something that isn't working.
+- **After 5+ tool calls debugging a single issue without progress**: briefly explain the situation to the user and ask if they want you to continue or try a different approach. Don't silently burn tokens on a rabbit hole.
+- Prefer root-cause analysis over brute force. If a resource fails to load, investigate *why* before trying workarounds.
+
+## Important caveats
+
+- **DOM replacement destroys content scripts**: If you replace \`document.documentElement.innerHTML\` or the full document body, the extension's console/network capture scripts will be disrupted. The system will attempt to reinject them, but previous capture data will be lost. Be aware of this when doing full-page rewrites.
+- **Cross-origin restrictions**: When fetching resources from domains other than the current page, CORS rules apply. Images may fail due to anti-hotlinking (Referer checks) or CORS headers. If an image fails to load, check the original page source for the correct URL variant before trying workarounds.
+- **inject_script runs in the MAIN world**: Your injected code shares the page's JavaScript context, including its CSP restrictions, patched globals, and framework state.`;
 
 export class Session {
   private client: Anthropic;

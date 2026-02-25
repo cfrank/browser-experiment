@@ -11,7 +11,7 @@ import type { OrchestratorServer } from "../server/ws.js";
 import type { ToolExecutorOutput } from "./registry.js";
 
 const SCREENSHOT_DIR = join(tmpdir(), "browser-agent-screenshots");
-const SCREENSHOT_COOLDOWN_MS = 5_000;
+const SCREENSHOT_WINDOW_MS = 120_000;
 
 async function saveScreenshot(
   base64: string,
@@ -36,8 +36,20 @@ function parseDataUrl(dataUrl: string): {
   return { mediaType: match[1] as ImageMediaType, base64: match[2] };
 }
 
+function getScreenshotCooldown(timestamps: number[]): number {
+  const now = Date.now();
+  while (timestamps.length > 0 && now - timestamps[0] > SCREENSHOT_WINDOW_MS) {
+    timestamps.shift();
+  }
+  const count = timestamps.length;
+  if (count >= 5) return 20_000;
+  if (count >= 3) return 10_000;
+  return 5_000;
+}
+
 export function createBrowserToolExecutor(server: OrchestratorServer) {
   let lastScreenshotTime = 0;
+  const screenshotTimestamps: number[] = [];
 
   return async function executeBrowser(
     input: Record<string, unknown>,
@@ -51,10 +63,18 @@ export function createBrowserToolExecutor(server: OrchestratorServer) {
 
     if (command === "screenshot") {
       const now = Date.now();
+      const cooldown = getScreenshotCooldown(screenshotTimestamps);
       const elapsed = now - lastScreenshotTime;
-      if (lastScreenshotTime > 0 && elapsed < SCREENSHOT_COOLDOWN_MS) {
-        const waitSec = ((SCREENSHOT_COOLDOWN_MS - elapsed) / 1000).toFixed(1);
-        return `Screenshot rate-limited: wait ${waitSec}s. Use inject_script or read_dom to check page state instead.`;
+      if (lastScreenshotTime > 0 && elapsed < cooldown) {
+        const waitSec = ((cooldown - elapsed) / 1000).toFixed(1);
+        const recentCount = screenshotTimestamps.length;
+        let msg = `Screenshot rate-limited: wait ${waitSec}s.`;
+        if (recentCount >= 3) {
+          msg += ` You've taken ${recentCount} screenshots in the last 2 minutes — cooldown has increased to ${cooldown / 1000}s. Use inject_script or read_dom to verify page state instead.`;
+        } else {
+          msg += " Use inject_script or read_dom to check page state instead.";
+        }
+        return msg;
       }
     }
 
@@ -72,7 +92,9 @@ export function createBrowserToolExecutor(server: OrchestratorServer) {
     }
 
     if (command === "screenshot" && typeof result.data === "string") {
-      lastScreenshotTime = Date.now();
+      const now = Date.now();
+      lastScreenshotTime = now;
+      screenshotTimestamps.push(now);
 
       const { mediaType, base64 } = parseDataUrl(result.data);
       const filepath = await saveScreenshot(base64, mediaType);

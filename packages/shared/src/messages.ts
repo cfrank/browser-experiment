@@ -66,7 +66,8 @@ export type BrowserCommandName =
   | "get_url"
   | "navigate"
   | "open_tab"
-  | "open_window";
+  | "open_window"
+  | "wait_for";
 
 export interface BrowserCommandPayload {
   command: BrowserCommandName;

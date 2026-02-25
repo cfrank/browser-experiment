@@ -101,7 +101,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: "browser",
     description:
-      "Execute a command in the user's browser via the Chrome extension. Available commands: screenshot, console_logs, network_logs, inject_script, inject_style, read_dom, get_url, navigate.",
+      "Execute a command in the user's browser via the Chrome extension. Available commands: screenshot, console_logs, network_logs, inject_script, inject_style, read_dom, get_url, navigate, wait_for.",
     input_schema: {
       type: "object",
       properties: {
@@ -118,13 +118,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
             "navigate",
             "open_tab",
             "open_window",
+            "wait_for",
           ],
           description: "The browser command to execute",
         },
         args: {
           type: "object",
           description:
-            "Command-specific arguments. screenshot: {}. console_logs: {}. network_logs: {}. inject_script: { code: string }. inject_style: { css: string }. read_dom: { selector: string }. get_url: {}. navigate: { url: string }. open_tab: { url: string, active?: boolean }. open_window: { url: string, incognito?: boolean }. All URL args accept http://, https://, and file:// schemes.",
+            "Command-specific arguments. screenshot: {}. console_logs: {}. network_logs: {}. inject_script: { code: string, timeout_ms?: number } — if the code returns a Promise, it is awaited (default timeout: 30s). inject_style: { css: string }. read_dom: { selector: string }. get_url: {}. navigate: { url: string }. open_tab: { url: string, active?: boolean }. open_window: { url: string, incognito?: boolean }. wait_for: { condition: string, timeout_ms?: number, poll_ms?: number } — polls a JS expression until truthy (default timeout: 5s, poll: 200ms). All URL args accept http://, https://, and file:// schemes.",
         },
       },
       required: ["command"],

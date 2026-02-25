@@ -62,13 +62,23 @@ const commandExecutors: Record<string, CommandExecutor> = {
   async inject_script(args) {
     const code = args.code as string;
     if (!code) throw new Error("inject_script requires a code argument");
+    const timeout = (args.timeout_ms as number) ?? 30_000;
     const tab = await getActiveTab();
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id! },
-      func: (src: string) => {
-        return eval(src);
+      func: async (src: string, timeoutMs: number) => {
+        const result = eval(src);
+        if (result && typeof result === "object" && typeof result.then === "function") {
+          return Promise.race([
+            result,
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error(`async result timed out after ${timeoutMs}ms`)), timeoutMs),
+            ),
+          ]);
+        }
+        return result;
       },
-      args: [code],
+      args: [code, timeout],
       world: "MAIN",
     });
     return results[0]?.result ?? null;
@@ -101,22 +111,82 @@ const commandExecutors: Record<string, CommandExecutor> = {
     return results[0]?.result ?? null;
   },
 
+  async wait_for(args) {
+    const condition = args.condition as string;
+    if (!condition) throw new Error("wait_for requires a condition argument");
+    const timeoutMs = (args.timeout_ms as number) ?? 5_000;
+    const pollMs = (args.poll_ms as number) ?? 200;
+    const tab = await getActiveTab();
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id! },
+      func: async (cond: string, timeout: number, poll: number) => {
+        const start = Date.now();
+        while (Date.now() - start < timeout) {
+          try {
+            const val = eval(cond);
+            if (val) return { met: true, value: val, elapsed_ms: Date.now() - start };
+          } catch { /* condition not met yet */ }
+          await new Promise((r) => setTimeout(r, poll));
+        }
+        try {
+          const val = eval(cond);
+          if (val) return { met: true, value: val, elapsed_ms: Date.now() - start };
+        } catch { /* final attempt failed */ }
+        return { met: false, elapsed_ms: Date.now() - start };
+      },
+      args: [condition, timeoutMs, pollMs],
+      world: "MAIN",
+    });
+    return results[0]?.result ?? null;
+  },
+
   async console_logs() {
     const tab = await getActiveTab();
-    const response = await chrome.tabs.sendMessage(tab.id!, {
-      type: "get_console_logs",
-    });
-    return response;
+    try {
+      return await chrome.tabs.sendMessage(tab.id!, { type: "get_console_logs" });
+    } catch (err) {
+      return handleContentScriptError(tab, err, "get_console_logs");
+    }
   },
 
   async network_logs() {
     const tab = await getActiveTab();
-    const response = await chrome.tabs.sendMessage(tab.id!, {
-      type: "get_network_logs",
-    });
-    return response;
+    try {
+      return await chrome.tabs.sendMessage(tab.id!, { type: "get_network_logs" });
+    } catch (err) {
+      return handleContentScriptError(tab, err, "get_network_logs");
+    }
   },
 };
+
+async function handleContentScriptError(
+  tab: chrome.tabs.Tab,
+  err: unknown,
+  messageType: string,
+): Promise<unknown> {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (!msg.includes("Receiving end does not exist") && !msg.includes("Could not establish connection")) {
+    throw err;
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id! },
+      files: ["content.js"],
+    });
+    const response = await chrome.tabs.sendMessage(tab.id!, { type: messageType });
+    return {
+      reinjected: true,
+      entries: response,
+      note: "Content script was reinjected (previous capture data was lost). New captures will work normally.",
+    };
+  } catch {
+    throw new Error(
+      "Content script is unavailable and could not be reinjected. " +
+      "This can happen after full DOM replacement (e.g. document.documentElement.innerHTML = ...) " +
+      "or extension reload. Try reloading the page to restore capture functionality.",
+    );
+  }
+}
 
 function extLog(
   client: OrchestratorClient,
