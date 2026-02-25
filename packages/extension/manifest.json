@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "Browser Agent",
+  "version": "0.0.1",
+  "description": "Deep agentic LLM integration with your browser",
+  "permissions": [
+    "sidePanel",
+    "activeTab",
+    "scripting",
+    "tabs",
+    "storage",
+    "declarativeNetRequest"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "strip_csp",
+        "enabled": true,
+        "path": "rules/strip_csp.json"
+      }
+    ]
+  },
+  "action": {
+    "default_title": "Open Browser Agent"
+  }
+}
